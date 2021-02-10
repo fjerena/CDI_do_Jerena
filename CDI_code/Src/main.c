@@ -103,6 +103,8 @@ volatile struct_Calibration Calibration_RAM = {15000,
 																							//64 -> 18 degree, calib_table = 64-ang_obj+18 <-> ang_obj = 64-calib_table+18
 typedef struct system_info
 {
+	  uint32_t avarageEngineSpeed;
+    uint16_t engineSpeedFiltered;
     int32_t  tdutyInputSignalPred;
     int32_t  deltaEngineSpeed;
     uint8_t  Low_speed_detected;
@@ -121,7 +123,7 @@ typedef struct system_info
     uint8_t  nAdv;
 }system_vars;
 
-volatile system_vars scenario = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+volatile system_vars scenario = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 
 typedef struct timerproperty
 {
@@ -214,7 +216,7 @@ void Set_Ouput_Inversor(uint8_t Value)
 // A iterative binary search function. It returns
 // location of x in given array arr[l..r] if present,
 // otherwise -1
-int8_t binarySearch(uint16_t array[], uint8_t first, uint8_t last, uint16_t search)
+uint8_t binarySearch(volatile uint16_t array[], uint8_t first, uint8_t last, uint16_t search)
 {
     uint8_t middle;
 
@@ -238,11 +240,13 @@ int8_t binarySearch(uint16_t array[], uint8_t first, uint8_t last, uint16_t sear
 
         middle = (first + last)>>1;
     }
+		
+		return (255u);
 }
 
 //This function was prepared to return a 8 bits value, however is saturated  in 64
 //Its mandatory in rpm array there are some difference value between two adjacent fields, if do not respect will cause an error return 0xFF
-uint8_t linearInterpolation(uint16_t value, uint16_t x_array[], uint8_t y_array[])
+uint8_t linearInterpolation(uint16_t value, volatile uint16_t x_array[], volatile uint8_t y_array[])
 {
     uint8_t interp_index;
     uint8_t interp_res;
@@ -259,7 +263,7 @@ uint8_t linearInterpolation(uint16_t value, uint16_t x_array[], uint8_t y_array[
 
     interp_index = binarySearch(x_array, 0, 11, value);
 
-    if((x_array[interp_index+1]-x_array[interp_index])!=0)
+    if(((x_array[interp_index+1]-x_array[interp_index])!=0)&&(interp_index!=255u))
     {
         interp_res = (((y_array[interp_index+1]-y_array[interp_index])*(value-x_array[interp_index]))/(x_array[interp_index+1]-x_array[interp_index]))+y_array[interp_index];
         if(interp_res>64u)
@@ -270,7 +274,7 @@ uint8_t linearInterpolation(uint16_t value, uint16_t x_array[], uint8_t y_array[
     }
     else
     {
-        return(0xFF);
+        return(255u);
     }
 }
 
@@ -335,7 +339,7 @@ uint8_t ConvertNum4DigToStr(uint16_t num, uint8_t resp[], uint8_t i)
     uint8_t Mil, Cent, Dez, Unid;
     uint16_t Man;
 
-    if((num>=0u)&&(num<=9999u))
+    if(num<=9999u)
     {
         Mil = (num/1000u)+0x30;
         Man = num%1000u;
@@ -362,7 +366,7 @@ uint8_t ConvertNum3DigToStr(uint16_t num, uint8_t resp[], uint8_t i)
     uint8_t Cent, Dez, Unid;
     uint16_t Man;
 
-    if((num>=0u)&&(num<=999u))
+    if(num<=999u)
     {
         Cent = (num/100u)+0x30;
         Man = num%100u;
@@ -407,6 +411,38 @@ void Data_Transmission1(void)
 {
     transmstatus = TRANSMITING;
     HAL_UART_Transmit_DMA(&huart3, UART3_txBuffer, sizeof(UART3_txBuffer));
+}
+
+uint8_t digitalFilter8bits(uint8_t var, uint8_t k)
+{
+    static uint8_t varOld = 0u;
+    uint8_t varFiltered;
+    int32_t delta = 0;
+
+    delta = var - varOld;
+    varFiltered = ((delta*k)/255u)+varOld;
+    varOld = varFiltered;
+
+    return(varFiltered);
+}
+
+uint8_t digitalFilter16bits(uint16_t var, uint8_t k)
+{
+    static uint16_t varOld = 0u;
+    uint16_t varFiltered;
+    int32_t delta = 0;
+
+    delta = var - varOld;
+    varFiltered = ((delta*k)/255u)+varOld;
+    varOld = varFiltered;
+
+    return(varFiltered);
+}
+
+void Statistics(void)
+{
+    scenario.engineSpeedFiltered = digitalFilter8bits(scenario.Engine_Speed, 40u);
+    scenario.avarageEngineSpeed = (scenario.avarageEngineSpeed+scenario.Engine_Speed)>>1;
 }
 
 uint8_t Data_Reception(uint8_t strg[])
@@ -478,33 +514,7 @@ void Periodic_task(uint32_t period, void (*func)(void), sched_var var[], uint8_t
     }
 }
 
-uint8_t digitalFilter8bits(uint8_t var, uint8_t k)
-{
-    static uint8_t varOld = 0u;
-    uint8_t varFiltered;
-    int32_t delta = 0;
-
-    delta = var - varOld;
-    varFiltered = ((delta*k)/255u)+varOld;
-    varOld = varFiltered;
-
-    return(varFiltered);
-}
-
-uint8_t digitalFilter16bits(uint16_t var, uint8_t k)
-{
-    static uint16_t varOld = 0u;
-    uint16_t varFiltered;
-    int32_t delta = 0;
-
-    delta = var - varOld;
-    varFiltered = ((delta*k)/255u)+varOld;
-    varOld = varFiltered;
-
-    return(varFiltered);
-}
-
-void calculationEngineSpeed(system_vars *var)
+void calculationEngineSpeed(volatile system_vars *var)
 {
     var->Engine_Speed = RPM_const/var->Measured_Period;
     var->deltaEngineSpeed = var->Engine_Speed-var->Engine_Speed_old;
@@ -520,15 +530,6 @@ void calculationEngineSpeed(system_vars *var)
     }
 
     var->Engine_Speed_old = var->Engine_Speed;
-}
-
-void Statistics(void)
-{
-    static uint32_t avarageEngineSpeed;
-    static uint16_t engineSpeedFiltered;
-
-    engineSpeedFiltered = digitalFilter8bits(scenario.Engine_Speed, 40u);
-    avarageEngineSpeed = (avarageEngineSpeed+scenario.Engine_Speed)>>1;
 }
 
 int32_t predictionCalc(uint32_t period)
