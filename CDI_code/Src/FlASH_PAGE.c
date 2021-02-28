@@ -100,3 +100,12 @@ void Convert_To_Str (uint32_t *data, char *str)
 	}
 }
 
+void saveCalibRamToFlash(void)
+{
+	  Flash_Write_Data (0x0801FC00, calibFlashBlock.array_Calibration_RAM, (sizeof(calibFlashBlock.array_Calibration_RAM))>>2);	  	
+}
+
+void copyCalibFlashToRam(void)
+{
+    Flash_Read_Data (0x0801FC00, calibFlashBlock.array_Calibration_RAM);
+}

@@ -24,6 +24,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "FLASH_PAGE.h"
+#include "SerialComm.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -66,53 +67,7 @@ DMA_HandleTypeDef hdma_usart3_tx;
 enum Interruption_type {INT_FROM_CH1, INT_FROM_CH2, INT_FROM_CH3, INT_FROM_CH4} int_types;
 enum Event_status {EMPTY, PROGRAMMED} status;
 enum Engine_States {STOPPED, CRANKING, ACCELERATION, STEADY_STATE, DECELERATION, OVERSPEED} engstates;
-enum Transmission_Status {TRANSMITING, TRANSMISSION_DONE} transmstatus;
-enum Reception_Status {DATA_AVAILABLE_RX_BUFFER, RECEPTION_DONE} receptstatus;
 enum engineSpeed {LOW, HIGH} pulseMngmt;
-
-uint8_t flgTransmition = OFF;
-
-/*
-2 different speed
-Low  <  1200                                  // fixed advance ignition
-High >= First breakpoint(with restriction %)  // according igntion map
-%Due the sw conception, the first break point must be >= 1200rpm
-Engine Speed: Stopped, Acceleration, Steady State, Decelerate
-Engine > Cut_Ignition threshould -> Cut ignition complete in Overspeed
-*/
-typedef struct
-{
-    uint8_t  sensorAngDisplecement;
-    uint16_t Max_Engine_Speed;
-    uint16_t BP_Engine_Speed[12];
-    uint8_t  BP_Timing_Advance[12];
-    uint8_t  alpha;
-    uint8_t  beta;
-    uint8_t  gamma;
-}dataCalibration;
-
-#define blockSize sizeof (dataCalibration)
-
-typedef union 
-{
-    dataCalibration Calibration_RAM;
-    uint32_t array_Calibration_RAM[blockSize>>2];   //Divided in 4 (32/4 = 8 byte)	  
-    uint8_t array_Calibration_RAM_UART[blockSize];
-}calibrationBlock;
-
-calibrationBlock calibFlashBlock;
-
-static const calibrationBlock Initial_Calibration = { 28, 7500,
-	                                            ////The first Engine Speed value in the array needs to be 1200 or greater than mandatory
-                                              { 1300, 2000, 2500, 3000, 3500, 4000, 4500, 7000, 8000, 9000,12000,15000},
-                                              //{  64,   64,   64,   64,   64,   64,   64,   64,   64,   64,    64,    64}, 90, 80, 10};
-                                              //{  48,   48,   48,   48,   48,   48,   48,   48,   48,   48,    48,    48}, 90, 80, 10};
-                                              //{  32,   32,   32,   32,   32,   32,   32,   32,   32,   32,    32,    32}, 90, 80, 10};
-                                              //{  16,   16,   16,   16,   16,   16,   16,   16,   16,   16,    16,    16}, 90, 80, 10};
-                                              //{   0,    0,    0,    0,    0,    0,    0,    0,    0,    0,     0,     0}, 90, 80, 10};
-                                              //{  64,   54,   44,   39,   36,   32,   32,   36,   40,   45,     55,     64}, 90, 80, 10};
-                                              {   64,   58,   48,   38,   25,   15,    0,    0,   40,   45,   55,   64}, 90, 80, 10};
-                                              //64 -> 18 degree, calib_table = 64-ang_obj+18 <-> ang_obj = 64-calib_table+								
 
 typedef struct system_info
 {
@@ -164,10 +119,6 @@ typedef struct Scheduler
 
 sched_var array_sched_var[3];
 
-//UART Communication
-uint8_t UART3_txBuffer[blockSize+2];
-uint8_t UART3_rxBuffer[blockSize+2];
-uint8_t UART3_rxBufferAlt[11];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -178,108 +129,6 @@ static void MX_TIM2_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_USART3_UART_Init(void);
 /* USER CODE BEGIN PFP */
-
-void initializeCalibOnRAM(void)
-{
-    uint32_t i;
-
-    for(i=0;i<sizeof(dataCalibration);i++)
-    {
-			  calibFlashBlock.array_Calibration_RAM_UART[i] = Initial_Calibration.array_Calibration_RAM_UART[i];
-    }
-}
-
-void copyCalibUARTtoRAM(void)	
-{
-    uint32_t i;
-
-    for(i=0;i<sizeof(dataCalibration);i++)
-    {
-        calibFlashBlock.array_Calibration_RAM_UART[i] = UART3_rxBuffer[i+1];
-    }
-}
-
-void saveCalibRamToFlash(void)
-{
-	  Flash_Write_Data (0x0801FC00, calibFlashBlock.array_Calibration_RAM, (sizeof(calibFlashBlock.array_Calibration_RAM))>>2);	  	
-}
-
-void copyCalibFlashToRam(void)
-{
-    Flash_Read_Data (0x0801FC00, calibFlashBlock.array_Calibration_RAM);
-}
-
-void transmitCalibToUART(void)
-{
-    uint32_t i;
-    uint8_t checksum;
-    uint32_t buffer_length;
-
-    if(transmstatus == TRANSMISSION_DONE)
-    {
-        buffer_length = sizeof(UART3_txBuffer);
-
-        UART3_txBuffer[0] = 0x7E;
-        checksum = UART3_txBuffer[0];
-
-        for (i=1;i<buffer_length-2;i++)
-        {
-            UART3_txBuffer[i] = calibFlashBlock.array_Calibration_RAM_UART[i-1];
-            checksum += UART3_txBuffer[i];
-        }
-
-        UART3_txBuffer[buffer_length-1] = checksum;
-        transmstatus = TRANSMITING;
-        HAL_UART_Transmit_DMA(&huart3, UART3_txBuffer, sizeof(UART3_txBuffer));
-    }
-}
-
-void Data_Transmission(void);
-
-void receiveData(void)
-{
-    uint8_t command;
-    uint8_t checksum;
-    uint32_t buffer_length;
-    uint32_t i;
-
-    if(receptstatus == DATA_AVAILABLE_RX_BUFFER)
-    {
-        buffer_length = sizeof(UART3_rxBuffer);
-
-        for(i=0;i<buffer_length-1;i++)
-        {
-            checksum += UART3_rxBuffer[i];
-        }
-
-        if((UART3_rxBuffer[buffer_length-1]-checksum) == 0u)				
-        {
-            command = UART3_rxBuffer[0];
-
-            switch(command)
-            {
-								case 0x02:  flgTransmition = ON;
-                            break;
-							
-								case 0x03:  flgTransmition = OFF;
-                            break;
-							
-								case 0x47:  saveCalibRamToFlash();
-							              break;
-							
-                case 0x69:  transmitCalibToUART();
-                            break;
-							
-							  case 0x7E:  copyCalibUARTtoRAM();
-                            break;              
-
-                default:    break;
-            }
-        }
-
-        receptstatus = RECEPTION_DONE;
-    }
-}
 
 void systemInitialization(void)
 {	
@@ -464,74 +313,6 @@ void Timeout(uint32_t period, void (*func)(void), sched_var var[], uint8_t pos, 
     }
 }
 
-void transmitSystemInfo(void)
-{
-    uint8_t Mil, Cent, Dez, Unid;
-    uint16_t Man, num, num1;
-	  uint8_t checksum;
-	  uint32_t i;
-
-    num = scenario.Engine_Speed;
-    num1 = scenario.nAdv;
-
-    if((num<=9999u)&&(num1<=999u))
-    {
-        Mil = (num/1000u)+0x30;
-        Man = num%1000u;
-        Cent = (Man/100u)+0x30;
-        Man = Man%100u;
-        Dez = (Man/10u)+0x30;
-        Unid = (Man%10u)+0x30;
-
-        UART3_rxBufferAlt[0]='R';
-        UART3_rxBufferAlt[1]=Mil;
-        UART3_rxBufferAlt[2]=Cent;
-        UART3_rxBufferAlt[3]=Dez;
-        UART3_rxBufferAlt[4]=Unid;
-        UART3_rxBufferAlt[5]='A';
-
-        Cent = (num1/100u)+0x30;
-        Man = num1%100u;
-        Dez = (Man/10u)+0x30;
-        Unid = (Man%10u)+0x30;
-
-        UART3_rxBufferAlt[6]=Cent;
-        UART3_rxBufferAlt[7]=Dez;
-        UART3_rxBufferAlt[8]=Unid;        
-
-        for(i=0; i < sizeof(UART3_rxBufferAlt)-3; i++)
-				{
-						checksum += UART3_rxBufferAlt[i];
-				}	
-				
-				UART3_rxBufferAlt[9]=checksum; 
-				UART3_rxBufferAlt[10]=0x0A; // '\n' - Line feed
-
-        transmstatus = TRANSMITING;
-        HAL_UART_Transmit_DMA(&huart3, UART3_rxBufferAlt, sizeof(UART3_rxBufferAlt));
-		}		
-}
-
-void copyCalibUartToRam(void)
-{
-    uint8_t i;
-
-    for(i=0;i<blockSize;i++)
-    {
-        calibFlashBlock.array_Calibration_RAM[i] = UART3_rxBuffer[i];
-    }
-}
-
-void copyCalibRamToUart(void)
-{
-    uint8_t i;
-
-    for(i=0;i<blockSize;i++)
-    {
-        UART3_rxBuffer[i] = calibFlashBlock.array_Calibration_RAM[i];
-    }
-}
-
 uint8_t digitalFilter8bits(uint8_t var, uint8_t k)
 {
     static uint8_t varOld = 0u;
@@ -560,39 +341,6 @@ void Statistics(void)
     scenario.avarageEngineSpeed = (scenario.avarageEngineSpeed+scenario.Engine_Speed)>>1;
     scenario.sensorAngDisplecementMeasured = (scenario.TDuty_Input_Signal*360u)/scenario.Measured_Period;
 }
-
-/*
-uint8_t Data_Reception(uint8_t strg[])
-{
-    uint8_t i,j,k;
-    uint8_t sum, checksum;
-
-    k=0u;
-    checksum=strg[36];
-
-    for(i=0;i<strg[35];i++)
-    {
-        sum+=strg[i];
-    }
-
-    sum='7';
-
-    if(sum==checksum)
-    {
-        for(j=0;j<34;j=j+3)
-        {
-            calibFlashBlock.Calibration_RAM.BP_Timing_Advance[k]=(((strg[j]-48u)*100u)+((strg[j+1]-48u)*10u)+((strg[j+2]-48u*1u)));
-            k++;
-        }
-
-        return(TRUE);
-    }
-    else
-    {
-        return(FALSE);
-    }
-}
-*/
 
 void Task_Fast(void)
 {
@@ -756,24 +504,6 @@ void Set_Pulse_Program(void)
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
-{
-    transmstatus = TRANSMISSION_DONE;
-}
-
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    HAL_UART_Receive_DMA(&huart3, (uint8_t*)UART3_rxBuffer, sizeof(UART3_rxBuffer));
-    receptstatus = DATA_AVAILABLE_RX_BUFFER;
-}
-
-void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
-{
-    static int8_t k;
-
-    k++;
-}
 
 /* USER CODE END 0 */
 

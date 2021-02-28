@@ -413,6 +413,11 @@
               <FileType>1</FileType>
               <FilePath>..\Src\FlASH_PAGE.c</FilePath>
             </File>
+            <File>
+              <FileName>SerialComm.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Src\SerialComm.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
